@@ -1,0 +1,35 @@
+# Исключаем .docx файлы
+*.docx
+~$*.docx
+
+# Исключаем пояснительную записку
+ПОЯСНИТЕЛЬНАЯ_ЗАПИСКА.md
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Streamlit
+.streamlit/
+
+# Kaggle API (если содержит секретные данные)
+.kaggle/kaggle.json
+

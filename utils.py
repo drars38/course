@@ -1,0 +1,434 @@
+"""
+Общие утилиты для EDA приложения
+"""
+import pandas as pd
+import numpy as np
+import streamlit as st
+import os
+import json
+from pathlib import Path
+
+
+def sample_data_for_plotting(df, max_points=None, use_sampling=True):
+    """Выбирает данные для визуализации, если датасет слишком большой"""
+    if df is None or df.empty:
+        return df
+    
+    if not use_sampling:
+        return df
+    
+    if max_points is None:
+        max_points = 10000
+    
+    if len(df) <= max_points:
+        return df
+    
+    # Используем случайную выборку
+    sampled_df = df.sample(n=max_points, random_state=42)
+    return sampled_df
+
+
+def detect_and_fix_shift(df):
+    """Обнаруживает и исправляет сдвиги в данных из-за запятых в значениях"""
+    if df is None or df.empty:
+        return df, False
+    
+    # Определяем тип разделителя
+    sample_row = df.iloc[0].astype(str).str.cat(sep=' ')
+    has_tabs = '\t' in sample_row
+    
+    fixed = False
+    original_shape = df.shape[1]
+    
+    # Проверяем числовые колонки - если в них текст, возможно есть сдвиг
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    
+    # Если слишком мало числовых колонок, возможно есть проблема
+    if len(numeric_cols) < df.shape[1] * 0.3:
+        # Проверяем последние колонки - они должны быть числовыми
+        last_cols = df.columns[-5:].tolist()
+        for col in last_cols:
+            if df[col].dtype == 'object':
+                # Пытаемся преобразовать в число
+                non_numeric = df[col].astype(str).str.contains(r'[^0-9.\-]', na=False, regex=True)
+                if non_numeric.sum() > len(df) * 0.1:  # Более 10% не числовых
+                    fixed = True
+                    break
+    
+    # Если обнаружен сдвиг, пытаемся исправить
+    if fixed or has_tabs:
+        return df, False  # Пока возвращаем как есть, но добавим предупреждение
+    
+    return df, fixed
+
+
+def fix_data_shift(df):
+    """Проверяет типы данных в первых и последних 15 строках на наличие сдвигов"""
+    if df is None or df.empty or df.shape[0] < 30:
+        return df, False, None
+    
+    # Берем первые и последние 15 строк
+    first_15 = df.head(15)
+    last_15 = df.tail(15)
+    
+    # Определяем типы данных для каждой колонки в первых и последних строках
+    def get_column_type(series):
+        """Определяет тип колонки: numeric или text"""
+        if series.dtype in [np.int64, np.float64]:
+            return 'numeric'
+        
+        # Пробуем преобразовать в число
+        numeric_count = pd.to_numeric(series, errors='coerce').notna().sum()
+        numeric_ratio = numeric_count / len(series) if len(series) > 0 else 0
+        
+        if numeric_ratio > 0.7:  # Более 70% числовых - считаем числовой
+            return 'numeric'
+        else:
+            return 'text'
+    
+    # Получаем типы для каждой колонки
+    first_types = {}
+    last_types = {}
+    
+    for col in df.columns:
+        first_types[col] = get_column_type(first_15[col])
+        last_types[col] = get_column_type(last_15[col])
+    
+    # Проверяем несовпадения
+    mismatches = []
+    for col in df.columns:
+        if first_types[col] != last_types[col]:
+            mismatches.append({
+                'column': col,
+                'first_15_type': first_types[col],
+                'last_15_type': last_types[col]
+            })
+    
+    # Если есть несовпадения - возвращаем ошибку
+    if mismatches:
+        error_msg = "⚠️ Обнаружено несовпадение типов данных между первыми и последними строками:\n\n"
+        for mm in mismatches:
+            error_msg += f"- Колонка '{mm['column']}': первые 15 строк - {mm['first_15_type']}, последние 15 строк - {mm['last_15_type']}\n"
+        error_msg += "\nЭто может указывать на сдвиг данных в середине датасета (например, из-за запятых в текстовых полях)."
+        return df, False, error_msg
+    
+    return df, False, None
+
+
+@st.cache_data
+def load_data(uploaded_file, delimiter=None):
+    """Загружает данные из файла с обработкой сдвигов"""
+    if uploaded_file is not None:
+        try:
+            # Читаем первые строки для определения разделителя
+            content = uploaded_file.read().decode('utf-8')
+            uploaded_file.seek(0)
+            
+            # Если разделитель не указан, определяем автоматически
+            if delimiter is None:
+                # Считаем количество табуляций и запятых в первых строках
+                first_lines = content.split('\n')[:5]
+                tab_counts = [line.count('\t') for line in first_lines if line.strip()]
+                comma_counts = [line.count(',') for line in first_lines if line.strip()]
+                
+                avg_tabs = np.mean(tab_counts) if tab_counts else 0
+                avg_commas = np.mean(comma_counts) if comma_counts else 0
+                
+                # Если табуляций больше и они более равномерны - используем табуляцию
+                if avg_tabs > avg_commas and avg_tabs > 2:
+                    delimiter = '\t'
+                elif avg_commas > 2:
+                    delimiter = ','
+                else:
+                    delimiter = '\t'  # По умолчанию табуляция для TSV
+            
+            # Загружаем данные
+            if delimiter == '\t':
+                df = pd.read_csv(uploaded_file, sep='\t', encoding='utf-8', on_bad_lines='skip', engine='python')
+            else:
+                df = pd.read_csv(uploaded_file, sep=delimiter, quotechar='"', encoding='utf-8', on_bad_lines='skip', engine='python')
+            
+            uploaded_file.seek(0)
+            
+            # Применяем проверку сдвигов
+            df, was_fixed, shift_error = fix_data_shift(df)
+            
+            return df, shift_error, was_fixed
+        except Exception as e:
+            try:
+                # Пробуем альтернативные кодировки
+                uploaded_file.seek(0)
+                if delimiter == '\t':
+                    df = pd.read_csv(uploaded_file, sep='\t', encoding='latin-1', on_bad_lines='skip', engine='python')
+                else:
+                    df = pd.read_csv(uploaded_file, sep=delimiter or ',', encoding='latin-1', on_bad_lines='skip', engine='python')
+                uploaded_file.seek(0)
+                df, was_fixed, shift_error = fix_data_shift(df)
+                return df, shift_error, was_fixed
+            except Exception as e2:
+                return None, f"{str(e)} / {str(e2)}", False
+    return None, None, False
+
+
+def find_target_column(df, numeric_cols, categorical_cols):
+    """Находит целевую переменную в датасете"""
+    target_col = None
+    for col in df.columns:
+        if col.lower() in ['survived', 'target', 'label', 'y', 'class']:
+            target_col = col
+            break
+    
+    # Если нет явной целевой переменной, используем первый категориальный или числовой
+    if target_col is None:
+        if categorical_cols:
+            target_col = categorical_cols[0]
+        elif numeric_cols:
+            target_col = numeric_cols[0]
+    
+    return target_col
+
+
+@st.cache_data
+def compute_correlation_matrix(df, numeric_cols):
+    """Кэшированное вычисление корреляционной матрицы"""
+    if len(numeric_cols) < 2:
+        return None
+    return df[numeric_cols].corr()
+
+
+@st.cache_data
+def compute_basic_stats(df, numeric_cols):
+    """Кэшированное вычисление базовой статистики"""
+    if not numeric_cols:
+        return None
+    return df[numeric_cols].describe()
+
+
+@st.cache_data
+def compute_value_counts(df, col, top_n=10):
+    """Кэшированное вычисление частот значений"""
+    return df[col].value_counts().head(top_n)
+
+
+@st.cache_data
+def compute_outliers(df, col):
+    """Кэшированное вычисление выбросов"""
+    Q1 = df[col].quantile(0.25)
+    Q3 = df[col].quantile(0.75)
+    IQR = Q3 - Q1
+    lower_bound = Q1 - 1.5 * IQR
+    upper_bound = Q3 + 1.5 * IQR
+    outliers = df[(df[col] < lower_bound) | (df[col] > upper_bound)]
+    return Q1, Q3, IQR, lower_bound, upper_bound, outliers
+
+
+@st.cache_data
+def compute_missing_stats(df):
+    """Кэшированное вычисление статистики пропусков"""
+    missing_data = df.isnull().sum()
+    missing_percent = (missing_data / len(df)) * 100
+    missing_df = pd.DataFrame({
+        'Количество': missing_data,
+        'Процент': missing_percent
+    })
+    return missing_df[missing_df['Количество'] > 0].sort_values('Количество', ascending=False)
+
+
+# ========== ФУНКЦИИ ДЛЯ РАБОТЫ С KAGGLE ==========
+
+def get_kaggle_datasets():
+    """Возвращает список популярных датасетов для скачивания"""
+    return {
+        'Titanic': {
+            'dataset': 'c/titanic',
+            'description': 'Классический датасет о пассажирах Титаника (891 строка, 12 столбцов)',
+            'size': '~60 KB',
+            'requires_acceptance': True,  # Соревнование, требует принятия правил
+            'note': '⚠️ Требуется принять правила соревнования на Kaggle'
+        },
+        'House Prices': {
+            'dataset': 'c/house-prices-advanced-regression-techniques',
+            'description': 'Предсказание цен на дома (1460 строк, 81 столбец)',
+            'size': '~300 KB',
+            'requires_acceptance': True,  # Соревнование, требует принятия правил
+            'note': '⚠️ Требуется принять правила соревнования на Kaggle'
+        },
+        'Sales Data': {
+            'dataset': 'rohanrao/aisles-and-sales-data',
+            'description': 'Данные о продажах продуктов (примерно 10000+ строк)',
+            'size': '~500 KB',
+            'requires_acceptance': False,
+            'note': None
+        },
+        'Customer Segmentation': {
+            'dataset': 'vjchoudhary7/customer-segmentation-tutorial-in-python',
+            'description': 'Сегментация клиентов для маркетинга (2000 строк, 8 столбцов)',
+            'size': '~50 KB',
+            'requires_acceptance': False,
+            'note': None
+        },
+        'Iris': {
+            'dataset': 'uciml/iris',
+            'description': 'Классический датасет Iris для классификации (150 строк, 5 столбцов)',
+            'size': '~5 KB',
+            'requires_acceptance': False,
+            'note': None
+        },
+        'Wine Quality': {
+            'dataset': 'uciml/red-wine-quality-cortez-et-al-2009',
+            'description': 'Качество красного вина (1599 строк, 12 столбцов)',
+            'size': '~30 KB',
+            'requires_acceptance': False,
+            'note': None
+        }
+    }
+
+
+def setup_kaggle_api(username=None, api_key=None):
+    """Настраивает Kaggle API с учетными данными"""
+    try:
+        kaggle_dir = Path.home() / '.kaggle'
+        kaggle_dir.mkdir(exist_ok=True)
+        
+        kaggle_json = kaggle_dir / 'kaggle.json'
+        
+        if username and api_key:
+            # Сохраняем учетные данные
+            credentials = {
+                'username': username,
+                'key': api_key
+            }
+            with open(kaggle_json, 'w') as f:
+                json.dump(credentials, f)
+            # Устанавливаем правильные права доступа (только для Unix)
+            if os.name != 'nt':  # Не Windows
+                os.chmod(kaggle_json, 0o600)
+            return True, "✅ Kaggle API настроен успешно!"
+        elif kaggle_json.exists():
+            # Учетные данные уже есть
+            return True, "✅ Используются существующие учетные данные Kaggle"
+        else:
+            return False, "❌ Необходимо указать username и API key"
+    except Exception as e:
+        return False, f"❌ Ошибка настройки Kaggle API: {str(e)}"
+
+
+def download_kaggle_dataset(dataset_name, dataset_path):
+    """Скачивает датасет с Kaggle"""
+    try:
+        from kaggle.api.kaggle_api_extended import KaggleApi
+        
+        # Инициализируем API
+        api = KaggleApi()
+        try:
+            api.authenticate()
+        except Exception as auth_error:
+            error_msg = str(auth_error)
+            if "401" in error_msg or "Unauthorized" in error_msg:
+                return None, "Ошибка авторизации. Проверьте username и API key в настройках Kaggle"
+            else:
+                return None, f"Ошибка аутентификации Kaggle API: {error_msg}"
+        
+        # Создаем временную директорию для скачивания
+        import tempfile
+        with tempfile.TemporaryDirectory() as temp_dir:
+            try:
+                # Определяем, это соревнование или обычный датасет
+                if dataset_path.startswith('c/'):
+                    # Это соревнование - используем competition_download_files
+                    competition_name = dataset_path[2:]
+                    api.competition_download_files(competition_name, path=temp_dir, unzip=True)
+                else:
+                    # Обычный датасет
+                    api.dataset_download_files(dataset_path, path=temp_dir, unzip=True)
+            except Exception as download_error:
+                error_msg = str(download_error)
+                if "403" in error_msg or "Forbidden" in error_msg:
+                    # Обработка будет в основном блоке except
+                    raise download_error
+                elif "404" in error_msg or "Not Found" in error_msg:
+                    return None, f"Датасет не найден: {dataset_path}. Проверьте правильность пути к датасету."
+                else:
+                    return None, f"Ошибка скачивания датасета: {error_msg}"
+            
+            # Ищем CSV файлы в скачанной директории
+            csv_files = list(Path(temp_dir).glob('*.csv'))
+            
+            if not csv_files:
+                # Если нет CSV в корне, ищем в подпапках
+                csv_files = list(Path(temp_dir).rglob('*.csv'))
+            
+            if csv_files:
+                # Берем первый CSV файл (обычно основной файл датасета)
+                # Или файл с именем, похожим на название датасета
+                main_file = csv_files[0]
+                if len(csv_files) > 1:
+                    # Пытаемся найти файл train.csv или файл с названием датасета
+                    for f in csv_files:
+                        if 'train' in f.name.lower() or dataset_name.lower() in f.name.lower():
+                            main_file = f
+                            break
+                
+                # Читаем CSV файл с обработкой ошибок
+                try:
+                    df = pd.read_csv(main_file, encoding='utf-8')
+                except UnicodeDecodeError:
+                    # Пробуем другие кодировки
+                    try:
+                        df = pd.read_csv(main_file, encoding='latin-1')
+                    except:
+                        df = pd.read_csv(main_file, encoding='cp1252')
+                
+                if df is not None and not df.empty:
+                    return df, None
+                else:
+                    return None, f"Датасет загружен, но файл {main_file.name} пуст или поврежден"
+            else:
+                # Показываем, какие файлы были найдены (для отладки)
+                all_files = list(Path(temp_dir).rglob('*'))
+                file_extensions = [f.suffix for f in all_files if f.is_file()]
+                return None, f"Не найдено CSV файлов в датасете. Найдены файлы с расширениями: {set(file_extensions)}"
+                
+    except ImportError:
+        return None, "Библиотека kaggle не установлена. Установите: pip install kaggle"
+    except Exception as e:
+        error_msg = str(e)
+        if "401" in error_msg or "Unauthorized" in error_msg:
+            return None, "Ошибка авторизации. Проверьте username и API key в настройках Kaggle"
+        elif "403" in error_msg or "Forbidden" in error_msg:
+            # Формируем URL датасета для принятия правил
+            # Для соревнований (c/) используем другой URL
+            if dataset_path.startswith('c/'):
+                dataset_url = f"https://www.kaggle.com/competitions/{dataset_path[2:]}"
+                competition_name = dataset_path[2:]
+            else:
+                dataset_url = f"https://www.kaggle.com/datasets/{dataset_path}"
+                competition_name = None
+            
+            error_text = (
+                f"Доступ запрещен. Для скачивания этого датасета необходимо принять правила использования на Kaggle.\n\n"
+                f"📋 Что делать:\n"
+            )
+            
+            if competition_name:
+                error_text += (
+                    f"1. Откройте страницу соревнования: {dataset_url}\n"
+                    f"2. Нажмите кнопку 'Join Competition' или 'I Understand and Accept'\n"
+                    f"3. Примите правила соревнования (обычно требуется подтверждение по email)\n"
+                )
+            else:
+                error_text += (
+                    f"1. Откройте страницу датасета: {dataset_url}\n"
+                    f"2. Нажмите кнопку 'I Understand and Accept' или 'Accept Rules'\n"
+                )
+            
+            error_text += (
+                f"4. После принятия правил попробуйте скачать датасет снова\n\n"
+                f"💡 Альтернатива: Вы можете скачать датасет вручную с сайта Kaggle и загрузить через 'Загрузить CSV файл'"
+            )
+            
+            return None, error_text
+        elif "404" in error_msg or "Not Found" in error_msg:
+            return None, f"Датасет не найден: {dataset_path}. Проверьте правильность пути к датасету."
+        else:
+            return None, f"Ошибка скачивания: {error_msg}"
