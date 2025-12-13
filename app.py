@@ -131,25 +131,25 @@ fast_mode = st.sidebar.checkbox(
 if uploaded_file is not None or use_example_data:
     # Обновляем прогресс-бар (он уже создан выше)
     if uploaded_file is not None:
-    status_text.text("📂 Загрузка файла...")
-    progress_bar.progress(10)
-    
-    # Вычисляем хеш файла для определения, изменились ли данные
-    import hashlib
-    file_hash = hashlib.md5(uploaded_file.getvalue()).hexdigest()
-    
-    # Если файл изменился, сбрасываем состояние
-    if 'last_file_hash' not in st.session_state or st.session_state.last_file_hash != file_hash:
-        st.session_state.last_file_hash = file_hash
-        st.session_state.tabs_initialized = False
-        st.session_state.last_active_tab = -1
-        # Очищаем кэш гипотез при загрузке нового файла
-        for key in list(st.session_state.keys()):
-            if key.startswith('hypotheses_cache_'):
-                del st.session_state[key]
-    
-    df, error, has_shift = load_data(uploaded_file, selected_delimiter)
-    progress_bar.progress(30)
+        status_text.text("📂 Загрузка файла...")
+        progress_bar.progress(10)
+        
+        # Вычисляем хеш файла для определения, изменились ли данные
+        import hashlib
+        file_hash = hashlib.md5(uploaded_file.getvalue()).hexdigest()
+        
+        # Если файл изменился, сбрасываем состояние
+        if 'last_file_hash' not in st.session_state or st.session_state.last_file_hash != file_hash:
+            st.session_state.last_file_hash = file_hash
+            st.session_state.tabs_initialized = False
+            st.session_state.last_active_tab = -1
+            # Очищаем кэш гипотез при загрузке нового файла
+            for key in list(st.session_state.keys()):
+                if key.startswith('hypotheses_cache_'):
+                    del st.session_state[key]
+        
+        df, error, has_shift = load_data(uploaded_file, selected_delimiter)
+        progress_bar.progress(30)
     else:
         # Используем пример данных напрямую
         status_text.text("📂 Загрузка примера данных...")
@@ -158,6 +158,18 @@ if uploaded_file is not None or use_example_data:
         error = None
         has_shift = False
         progress_bar.progress(30)
+        
+        # Для примера данных используем хеш на основе DataFrame
+        import hashlib
+        example_hash = hashlib.md5(str(df.values.tobytes()).encode()).hexdigest()
+        if 'last_file_hash' not in st.session_state or st.session_state.last_file_hash != example_hash:
+            st.session_state.last_file_hash = example_hash
+            st.session_state.tabs_initialized = False
+            st.session_state.last_active_tab = -1
+            # Очищаем кэш гипотез при загрузке нового файла
+            for key in list(st.session_state.keys()):
+                if key.startswith('hypotheses_cache_'):
+                    del st.session_state[key]
     
     if error:
         progress_bar.progress(40)
@@ -206,6 +218,10 @@ if uploaded_file is not None or use_example_data:
         status_text.text(f"✅ Готово: {df.shape[0]} строк × {df.shape[1]} столбцов | Выберите вкладку для анализа")
         
         st.success(f"✅ Данные успешно загружены! Размер: {df.shape[0]} строк × {df.shape[1]} столбцов")
+        
+        # Экспорт отчета
+        st.sidebar.markdown("---")
+      
         
         # Предупреждение о выборке данных для больших датасетов
         if use_sampling and len(df) > max_plot_points:
@@ -670,6 +686,85 @@ if uploaded_file is not None or use_example_data:
         
         # Обновляем финальный статус после обработки всех вкладок
         status_text.text(f"✅ Готово: {df.shape[0]} строк × {df.shape[1]} столбцов | Анализ завершен")
+        
+        # Экспорт отчета
+        st.sidebar.markdown("---")
+        st.sidebar.subheader("📤 Экспорт отчета")
+        
+        # Подготовка данных для экспорта
+        from utils import generate_html_report, generate_pdf_report, compute_correlation_matrix
+        from tabs.tab6_hypotheses import _compute_hypotheses_data
+        
+        # Вычисляем данные для отчета
+        correlation_matrix = compute_correlation_matrix(df, numeric_cols) if len(numeric_cols) > 1 else None
+        
+        # VIF данные (упрощенная версия для экспорта)
+        vif_data = None
+        if len(numeric_cols) >= 2:
+            try:
+                from statsmodels.stats.outliers_influence import variance_inflation_factor
+                from statsmodels.tools.tools import add_constant
+                df_vif = df[numeric_cols].dropna()
+                if len(df_vif) > len(numeric_cols):
+                    X = add_constant(df_vif)
+                    vif_data = []
+                    for i, col in enumerate(numeric_cols):
+                        try:
+                            vif = variance_inflation_factor(X.values, i + 1)
+                            vif_data.append({
+                                'Признак': col,
+                                'VIF': f"{vif:.2f}",
+                                'Оценка': 'Сильная' if vif >= 10 else ('Умеренная' if vif >= 5 else 'Слабая')
+                            })
+                        except:
+                            pass
+            except:
+                pass
+        
+        # Гипотезы для экспорта (без графиков)
+        hypotheses_export = None
+        try:
+            hypotheses_full = _compute_hypotheses_data(df, numeric_cols, categorical_cols, target_col, max_plot_points, use_sampling)
+            if hypotheses_full:
+                hypotheses_export = []
+                for hyp in hypotheses_full:
+                    hyp_export = {
+                        'Гипотеза': hyp.get('Гипотеза', ''),
+                        'Обоснование': hyp.get('Обоснование', ''),
+                        'Метод проверки': hyp.get('Метод проверки', ''),
+                    }
+                    if 'statistical_test' in hyp:
+                        hyp_export['statistical_test'] = hyp['statistical_test']
+                    hypotheses_export.append(hyp_export)
+        except:
+            pass
+        
+        # Кнопки экспорта
+        col1, col2 = st.sidebar.columns(2)
+        with col1:
+            html_report = generate_html_report(df, numeric_cols, categorical_cols, target_col, 
+                                              correlation_matrix, vif_data, hypotheses_export)
+            st.sidebar.download_button(
+                label="📄 Скачать HTML",
+                data=html_report,
+                file_name=f"eda_report_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.html",
+                mime="text/html",
+                use_container_width=True
+            )
+        
+        with col2:
+            try:
+                pdf_report = generate_pdf_report(df, numeric_cols, categorical_cols, target_col,
+                                               correlation_matrix, vif_data, hypotheses_export)
+                st.sidebar.download_button(
+                    label="📑 Скачать PDF",
+                    data=pdf_report,
+                    file_name=f"eda_report_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True
+                )
+            except Exception as e:
+                st.sidebar.error(f"Ошибка генерации PDF: {str(e)}")
     
     else:
         st.info("👆 Пожалуйста, загрузите CSV файл в боковой панели для начала анализа")
@@ -686,10 +781,10 @@ else:
     with example_tab1:
         st.markdown("**Загрузка встроенных датасетов из библиотеки Seaborn**")
         if st.button("🛳️ Загрузить Titanic (Seaborn)"):
-        try:
-            df_example = sns.load_dataset('titanic')
+            try:
+                df_example = sns.load_dataset('titanic')
                 if df_example is not None and not df_example.empty:
-            st.session_state['example_df'] = df_example
+                    st.session_state['example_df'] = df_example
                     st.success(f"✅ Пример загружен! Размер: {df_example.shape[0]} строк × {df_example.shape[1]} столбцов")
                     st.rerun()
                 else:

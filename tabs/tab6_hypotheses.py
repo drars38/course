@@ -45,6 +45,12 @@ def render_hypotheses_tab(df, numeric_cols, categorical_cols, target_col, max_pl
                     st.markdown("---")
                     st.markdown("**🔬 Метод проверки:**")
                     st.write(hyp['Метод проверки'])
+                    
+                    # Показываем результаты статистических тестов, если они есть
+                    if 'statistical_test' in hyp and hyp['statistical_test']:
+                        st.markdown("---")
+                        st.markdown("**📊 Статистический тест:**")
+                        st.markdown(hyp['statistical_test'])
     else:
         st.info("💡 Гипотезы будут сгенерированы после более детального анализа данных. Убедитесь, что данные загружены корректно.")
         st.markdown("**Совет:** Проверьте, что:")
@@ -124,11 +130,78 @@ def _compute_hypotheses_data(df, numeric_cols, categorical_cols, target_col, max
                         
                         plt.tight_layout()
                         
+                        # Выполняем статистические тесты
+                        statistical_test_result = ""
+                        groups_data = [df_filtered[df_filtered[cat_col] == group][num_col].dropna() for group in top_groups]
+                        groups_data = [g for g in groups_data if len(g) > 0]  # Убираем пустые группы
+                        
+                        if len(groups_data) == 2:
+                            # t-тест для двух групп
+                            try:
+                                from scipy.stats import ttest_ind
+                                stat, p_value = ttest_ind(groups_data[0], groups_data[1])
+                                
+                                # Интерпретация t-статистики (по абсолютному значению)
+                                abs_stat = abs(stat)
+                                if abs_stat < 1:
+                                    t_interpretation = "Очень слабые различия"
+                                elif abs_stat < 2:
+                                    t_interpretation = "Слабые различия"
+                                elif abs_stat < 3:
+                                    t_interpretation = "Умеренные различия"
+                                elif abs_stat < 5:
+                                    t_interpretation = "Сильные различия"
+                                else:
+                                    t_interpretation = "Очень сильные различия"
+                                
+                                statistical_test_result = f"**t-тест (две группы):**\n"
+                                statistical_test_result += f"- t-статистика: {stat:.4f} ({t_interpretation})\n"
+                                statistical_test_result += f"- p-value: {p_value:.6f}\n"
+                                statistical_test_result += f"- Размер группы 1: {len(groups_data[0])} наблюдений\n"
+                                statistical_test_result += f"- Размер группы 2: {len(groups_data[1])} наблюдений\n"
+                                if p_value < 0.05:
+                                    statistical_test_result += f"- ✅ **Статистически значимое различие** (p < 0.05)\n"
+                                    statistical_test_result += f"- 💡 Чем больше |t|, тем сильнее различия между группами\n"
+                                else:
+                                    statistical_test_result += f"- ❌ Нет статистически значимого различия (p ≥ 0.05)\n"
+                            except Exception as e:
+                                statistical_test_result = f"Ошибка при выполнении t-теста: {str(e)}"
+                        elif len(groups_data) > 2:
+                            # ANOVA для трех и более групп
+                            try:
+                                from scipy.stats import f_oneway
+                                stat, p_value = f_oneway(*groups_data)
+                                
+                                # Интерпретация F-статистики
+                                if stat < 1:
+                                    f_interpretation = "Очень слабые различия"
+                                elif stat < 5:
+                                    f_interpretation = "Слабые различия"
+                                elif stat < 20:
+                                    f_interpretation = "Умеренные различия"
+                                elif stat < 100:
+                                    f_interpretation = "Сильные различия"
+                                else:
+                                    f_interpretation = "Очень сильные различия"
+                                
+                                statistical_test_result = f"**ANOVA (F-тест):**\n"
+                                statistical_test_result += f"- F-статистика: {stat:.4f} ({f_interpretation})\n"
+                                statistical_test_result += f"- p-value: {p_value:.6f}\n"
+                                statistical_test_result += f"- Количество групп: {len(groups_data)}\n"
+                                if p_value < 0.05:
+                                    statistical_test_result += f"- ✅ **Статистически значимое различие между группами** (p < 0.05)\n"
+                                    statistical_test_result += f"- 💡 Чем больше F-статистика, тем сильнее различия между группами\n"
+                                else:
+                                    statistical_test_result += f"- ❌ Нет статистически значимого различия между группами (p ≥ 0.05)\n"
+                            except Exception as e:
+                                statistical_test_result = f"Ошибка при выполнении ANOVA: {str(e)}"
+                        
                         hypotheses.append({
                             'id': len(hypotheses),
                             'Гипотеза': f"Признак '{cat_col}' влияет на '{num_col}'",
                             'Обоснование': f"Средние значения '{num_col}' различаются по группам '{cat_col}' (разброс: {grouped_means.std():.2f})",
                             'Метод проверки': "ANOVA, t-test, визуализация boxplot",
+                            'statistical_test': statistical_test_result,
                             'plot': fig
                         })
                 except:
@@ -354,12 +427,21 @@ def _compute_hypotheses_data(df, numeric_cols, categorical_cols, target_col, max
                     st.markdown("---")
                     st.markdown("**🔬 Метод проверки:**")
                     st.write(hyp['Метод проверки'])
+                    
+                    # Показываем результаты статистических тестов, если они есть
+                    if 'statistical_test' in hyp and hyp['statistical_test']:
+                        st.markdown("---")
+                        st.markdown("**📊 Статистический тест:**")
+                        st.markdown(hyp['statistical_test'])
     else:
         st.info("💡 Гипотезы будут сгенерированы после более детального анализа данных. Убедитесь, что данные загружены корректно.")
         st.markdown("**Совет:** Проверьте, что:")
         st.markdown("- В данных есть числовые и категориальные признаки")
         st.markdown("- Данные не содержат критических ошибок")
         st.markdown("- Разделители в CSV файле корректны")
+
+
+
 
 
 
